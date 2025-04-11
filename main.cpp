@@ -10,14 +10,6 @@
 
 
 
-/********************************************************
-*****             Definitions For Wifi              *****
-********************************************************/
-#define WIFI_SSID                   "your_ssid"
-#define WIFI_PASSWORD               "your_password"
-#define UDP_PORT                    12345
-#define CONTROLLER_MESSAGE_LENGTH   18 
-
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 #include <SDL3/SDL_init.h>
@@ -26,6 +18,14 @@
 #include <stdio.h> // For printf function
 #include <stdlib.h> // For rand function
 #include <vector> // For dynamic bullet storage
+
+/********************************************************
+*****             Definitions For Wifi              *****
+********************************************************/
+#define WIFI_SSID                   "your_ssid"
+#define WIFI_PASSWORD               "your_password"
+#define UDP_PORT                    12345
+#define CONTROLLER_MESSAGE_LENGTH   18 
 
 
 /********************************************************
@@ -707,7 +707,7 @@ EVENTS control_handler(*EVENTS key_events) {
 
     int x = ((int)buffer[0])*100 + ((int)buffer[1])*10 + (int)buffer[2];
     int y = ((int)buffer[3])*100 + ((int)buffer[4])*10 + (int)buffer[5];
-    bool shoot_button = (buffer[6] == '1');
+    bool shoot_button = (buffer[6] == '1' || buffer[8] == '1');
     bool thrust_button = (buffer[7] == '1');
 
 

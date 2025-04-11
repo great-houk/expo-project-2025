@@ -38,11 +38,12 @@ try:
         y = controller.get_axis(1) * 100
         button1 = controller.get_button(pg.CONTROLLER_BUTTON_A)  
         button2 = controller.get_button(pg.CONTROLLER_BUTTON_B)  
+        button3 = controller.get_button(pg.CONTROLLER_AXIS_TRIGGERRIGHT)
     
         
-        message = f"{int(x):03},{int(y):03},{button1},{button2}"
-        client_socket.sendto(message.encode(), server_address)
-        
+        message = f"{int(x):03},{int(y):03},{button1},{button2},{button3}"
+        #client_socket.sendto(message.encode(), server_address)
+        print(message)
 
         # 20 actions per second
         time.sleep(0.05)  
