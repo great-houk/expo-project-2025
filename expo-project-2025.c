@@ -1,97 +1,274 @@
-#include <stdio.h>
-#include "pico/stdlib.h"
-#include "hardware/dma.h"
-#include "hardware/pio.h"
+/**
+ * Copyright (c) 2022 Raspberry Pi (Trading) Ltd.
+ *
+ * SPDX-License-Identifier: BSD-3-Clause
+ */
+
+#include <string.h>
+
 #include "pico/cyw43_arch.h"
+#include "pico/stdlib.h"
 
-// Data will be copied from src to dst
-const char src[] = "Hello, world! (from DMA)";
-char dst[count_of(src)];
+#include "lwip/pbuf.h"
+#include "lwip/tcp.h"
 
-#include "blink.pio.h"
+#include "dhcpserver.h"
+#include "dnsserver.h"
 
-void blink_pin_forever(PIO pio, uint sm, uint offset, uint pin, uint freq) {
-	blink_program_init(pio, sm, offset, pin);
-	pio_sm_set_enabled(pio, sm, true);
+#define TCP_PORT 4242
+#define DEBUG_printf printf
+#define BUF_SIZE 2048
+#define TEST_ITERATIONS 10
+#define POLL_TIME_S 5
 
-	printf("Blinking pin %d at %d Hz\n", pin, freq);
+typedef struct TCP_SERVER_T_ {
+	struct tcp_pcb* server_pcb;
+	struct tcp_pcb* client_pcb;
+	bool complete;
+	uint8_t buffer_sent[BUF_SIZE];
+	uint8_t buffer_recv[BUF_SIZE];
+	int sent_len;
+	int recv_len;
+	ip_addr_t gw;
+} TCP_SERVER_T;
 
-	// PIO counter program takes 3 more cycles in total than we pass as
-	// input (wait for n + 1; mov; jmp)
-	pio->txf[sm] = (125000000 / (2 * freq)) - 3;
+static TCP_SERVER_T* tcp_server_init(void) {
+	TCP_SERVER_T* state = calloc(1, sizeof(TCP_SERVER_T));
+	if (!state) {
+		DEBUG_printf("failed to allocate state\n");
+		return NULL;
+	}
+	return state;
+}
+
+static err_t tcp_server_close(void* arg) {
+	TCP_SERVER_T* state = (TCP_SERVER_T*)arg;
+	err_t err = ERR_OK;
+	if (state->client_pcb != NULL) {
+		tcp_arg(state->client_pcb, NULL);
+		tcp_poll(state->client_pcb, NULL, 0);
+		tcp_sent(state->client_pcb, NULL);
+		tcp_recv(state->client_pcb, NULL);
+		tcp_err(state->client_pcb, NULL);
+		err = tcp_close(state->client_pcb);
+		if (err != ERR_OK) {
+			DEBUG_printf("close failed %d, calling abort\n", err);
+			tcp_abort(state->client_pcb);
+			err = ERR_ABRT;
+		}
+		state->client_pcb = NULL;
+	}
+	if (state->server_pcb) {
+		tcp_arg(state->server_pcb, NULL);
+		tcp_close(state->server_pcb);
+		state->server_pcb = NULL;
+	}
+	return err;
+}
+
+static err_t tcp_server_result(void* arg, int status) {
+	TCP_SERVER_T* state = (TCP_SERVER_T*)arg;
+	if (status == 0) {
+		DEBUG_printf("test success\n");
+	} else {
+		DEBUG_printf("test failed %d\n", status);
+	}
+	state->complete = true;
+	return tcp_server_close(arg);
+}
+
+static err_t tcp_server_sent(void* arg, struct tcp_pcb* tpcb, u16_t len) {
+	TCP_SERVER_T* state = (TCP_SERVER_T*)arg;
+	DEBUG_printf("tcp_server_sent %u\n", len);
+	state->sent_len += len;
+
+	if (state->sent_len >= BUF_SIZE) {
+		// We should get the data back from the client
+		state->recv_len = 0;
+		DEBUG_printf("Waiting for buffer from client\n");
+	}
+
+	return ERR_OK;
+}
+
+err_t tcp_server_send_data(void* arg, struct tcp_pcb* tpcb) {
+	TCP_SERVER_T* state = (TCP_SERVER_T*)arg;
+	for (int i = 0; i < BUF_SIZE; i++) {
+		state->buffer_sent[i] = rand();
+	}
+
+	state->sent_len = 0;
+	DEBUG_printf("Writing %ld bytes to client\n", BUF_SIZE);
+	// this method is callback from lwIP, so cyw43_arch_lwip_begin is not
+	// required, however you can use this method to cause an assertion in debug
+	// mode, if this method is called when cyw43_arch_lwip_begin IS needed
+	cyw43_arch_lwip_check();
+	err_t err =
+		tcp_write(tpcb, state->buffer_sent, BUF_SIZE, TCP_WRITE_FLAG_COPY);
+	if (err != ERR_OK) {
+		DEBUG_printf("Failed to write data %d\n", err);
+		return tcp_server_result(arg, -1);
+	}
+	return ERR_OK;
+}
+
+err_t tcp_server_recv(void* arg,
+					  struct tcp_pcb* tpcb,
+					  struct pbuf* p,
+					  err_t err) {
+	TCP_SERVER_T* state = (TCP_SERVER_T*)arg;
+	if (!p) {
+		return tcp_server_result(arg, -1);
+	}
+	// this method is callback from lwIP, so cyw43_arch_lwip_begin is not
+	// required, however you can use this method to cause an assertion in debug
+	// mode, if this method is called when cyw43_arch_lwip_begin IS needed
+	cyw43_arch_lwip_check();
+	if (p->tot_len > 0) {
+		DEBUG_printf("tcp_server_recv %d/%d err %d\n", p->tot_len,
+					 state->recv_len, err);
+
+		// Receive the buffer
+		const uint16_t buffer_left = BUF_SIZE - state->recv_len;
+		state->recv_len += pbuf_copy_partial(
+			p, state->buffer_recv + state->recv_len,
+			p->tot_len > buffer_left ? buffer_left : p->tot_len, 0);
+		tcp_recved(tpcb, p->tot_len);
+	}
+	pbuf_free(p);
+
+	// Have we have received the whole buffer
+	if (state->recv_len == BUF_SIZE) {
+		// check it matches
+		if (memcmp(state->buffer_sent, state->buffer_recv, BUF_SIZE) != 0) {
+			DEBUG_printf("buffer mismatch\n");
+			return tcp_server_result(arg, -1);
+		}
+		DEBUG_printf("tcp_server_recv buffer ok\n");
+
+		// Test complete?
+		// if (state->run_count >= TEST_ITERATIONS) {
+		// 	tcp_server_result(arg, 0);
+		// 	return ERR_OK;
+		// }
+
+		// Send another buffer
+		return tcp_server_send_data(arg, state->client_pcb);
+	}
+	return ERR_OK;
+}
+
+static err_t tcp_server_poll(void* arg, struct tcp_pcb* tpcb) {
+	DEBUG_printf("tcp_server_poll_fn\n");
+	return tcp_server_result(arg, -1);	// no response is an error?
+}
+
+static void tcp_server_err(void* arg, err_t err) {
+	if (err != ERR_ABRT) {
+		DEBUG_printf("tcp_client_err_fn %d\n", err);
+		tcp_server_result(arg, err);
+	}
+}
+
+static err_t tcp_server_accept(void* arg,
+							   struct tcp_pcb* client_pcb,
+							   err_t err) {
+	TCP_SERVER_T* state = (TCP_SERVER_T*)arg;
+	if (err != ERR_OK || client_pcb == NULL) {
+		DEBUG_printf("Failure in accept\n");
+		tcp_server_result(arg, err);
+		return ERR_VAL;
+	}
+	DEBUG_printf("Client connected\n");
+
+	state->client_pcb = client_pcb;
+	tcp_arg(client_pcb, state);
+	tcp_sent(client_pcb, tcp_server_sent);
+	tcp_recv(client_pcb, tcp_server_recv);
+	tcp_poll(client_pcb, tcp_server_poll, POLL_TIME_S * 2);
+	tcp_err(client_pcb, tcp_server_err);
+
+	return tcp_server_send_data(arg, state->client_pcb);
+}
+
+static bool tcp_server_open(void* arg) {
+	TCP_SERVER_T* state = (TCP_SERVER_T*)arg;
+	DEBUG_printf("Starting server at %s on port %u\n",
+				 ip4addr_ntoa(netif_ip4_addr(netif_list)), TCP_PORT);
+
+	struct tcp_pcb* pcb = tcp_new_ip_type(IPADDR_TYPE_ANY);
+	if (!pcb) {
+		DEBUG_printf("failed to create pcb\n");
+		return false;
+	}
+
+	err_t err = tcp_bind(pcb, NULL, TCP_PORT);
+	if (err) {
+		DEBUG_printf("failed to bind to port %u\n", TCP_PORT);
+		return false;
+	}
+
+	state->server_pcb = tcp_listen_with_backlog(pcb, 1);
+	if (!state->server_pcb) {
+		DEBUG_printf("failed to listen\n");
+		if (pcb) {
+			tcp_close(pcb);
+		}
+		return false;
+	}
+
+	tcp_arg(state->server_pcb, state);
+	tcp_accept(state->server_pcb, tcp_server_accept);
+
+	return true;
 }
 
 int main() {
 	stdio_init_all();
 
-	// Initialise the Wi-Fi chip
-	if (cyw43_arch_init()) {
-		printf("Wi-Fi init failed\n");
-		return -1;
-	}
-
-	// Get a free channel, panic() if there are none
-	int chan = dma_claim_unused_channel(true);
-
-	// 8 bit transfers. Both read and write address increment after each
-	// transfer (each pointing to a location in src or dst respectively).
-	// No DREQ is selected, so the DMA transfers as fast as it can.
-
-	dma_channel_config c = dma_channel_get_default_config(chan);
-	channel_config_set_transfer_data_size(&c, DMA_SIZE_8);
-	channel_config_set_read_increment(&c, true);
-	channel_config_set_write_increment(&c, true);
-
-	dma_channel_configure(
-		chan,			// Channel to be configured
-		&c,				// The configuration we just created
-		dst,			// The initial write address
-		src,			// The initial read address
-		count_of(src),	// Number of transfers; in this case each is 1 byte.
-		true			// Start immediately.
-	);
-
-	// We could choose to go and do something else whilst the DMA is doing its
-	// thing. In this case the processor has nothing else to do, so we just
-	// wait for the DMA to finish.
-	dma_channel_wait_for_finish_blocking(chan);
-
-	// The DMA has now copied our text from the transmit buffer (src) to the
-	// receive buffer (dst), so we can print it out from there.
-	puts(dst);
-
-	// PIO Blinking example
-	PIO pio = pio0;
-	uint offset = pio_add_program(pio, &blink_program);
-	printf("Loaded program at %d\n", offset);
-
-#ifdef PICO_DEFAULT_LED_PIN
-	blink_pin_forever(pio, 0, offset, PICO_DEFAULT_LED_PIN, 3);
-#else
-	blink_pin_forever(pio, 0, offset, 6, 3);
-#endif
-	// For more pio examples see
-	// https://github.com/raspberrypi/pico-examples/tree/master/pio
-
-	// Enable wifi station
-	cyw43_arch_enable_sta_mode();
-
-	printf("Connecting to Wi-Fi...\n");
-	if (cyw43_arch_wifi_connect_timeout_ms("Your Wi-Fi SSID",
-										   "Your Wi-Fi Password",
-										   CYW43_AUTH_WPA2_AES_PSK, 30000)) {
-		printf("failed to connect.\n");
+	TCP_SERVER_T* state = calloc(1, sizeof(TCP_SERVER_T));
+	if (!state) {
+		DEBUG_printf("failed to allocate state\n");
 		return 1;
-	} else {
-		printf("Connected.\n");
-		// Read the ip address in a human readable way
-		uint8_t* ip_address = (uint8_t*)&(cyw43_state.netif[0].ip_addr.addr);
-		printf("IP address %d.%d.%d.%d\n", ip_address[0], ip_address[1],
-			   ip_address[2], ip_address[3]);
 	}
 
-	while (true) {
-		printf("Hello, world!\n");
+	if (cyw43_arch_init()) {
+		DEBUG_printf("failed to initialise\n");
+		return 1;
+	}
+
+	const char* ap_name = "picow_test";
+	const char* password = "password";
+
+	cyw43_arch_enable_ap_mode(ap_name, password, CYW43_AUTH_WPA2_AES_PSK);
+
+#define IP(x) (x)
+	ip4_addr_t mask;
+	IP(state->gw).addr = PP_HTONL(CYW43_DEFAULT_IP_AP_ADDRESS);
+	IP(mask).addr = PP_HTONL(CYW43_DEFAULT_IP_MASK);
+#undef IP
+
+	// Start the dhcp server
+	dhcp_server_t dhcp_server;
+	dhcp_server_init(&dhcp_server, &state->gw, &mask);
+
+	// Start the dns server
+	dns_server_t dns_server;
+	dns_server_init(&dns_server, &state->gw);
+
+	if (!tcp_server_open(state)) {
+		DEBUG_printf("failed to tcp open server\n");
+		return 1;
+	}
+
+	state->complete = false;
+	while (!state->complete) {
 		sleep_ms(1000);
 	}
+	tcp_server_close(state);
+	dns_server_deinit(&dns_server);
+	dhcp_server_deinit(&dhcp_server);
+	cyw43_arch_deinit();
+	printf("Test complete\n");
+	return 0;
 }

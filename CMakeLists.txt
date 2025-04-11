@@ -34,11 +34,16 @@ project(expo-project-2025 C CXX ASM)
 pico_sdk_init()
 
 # Add executable. Default name is the project name, version 0.1
-
-add_executable(expo-project-2025 expo-project-2025.c )
+add_executable(expo-project-2025 
+        expo-project-2025.c
+		dhcpserver/dhcpserver.c
+		dnsserver/dnsserver.c
+		main.cpp
+	)
 
 pico_set_program_name(expo-project-2025 "expo-project-2025")
 pico_set_program_version(expo-project-2025 "0.1")
+pico_set_float_implementation(expo-project-2025 pico_float_pico)
 
 # Generate PIO header
 pico_generate_pio_header(expo-project-2025 ${CMAKE_CURRENT_LIST_DIR}/blink.pio)
@@ -46,6 +51,7 @@ pico_generate_pio_header(expo-project-2025 ${CMAKE_CURRENT_LIST_DIR}/blink.pio)
 # Modify the below lines to enable/disable output over UART/USB
 pico_enable_stdio_uart(expo-project-2025 0)
 pico_enable_stdio_usb(expo-project-2025 0)
+pico_enable_stdio_rtt(expo-project-2025 1)
 
 # Add the standard library to the build
 target_link_libraries(expo-project-2025
@@ -54,6 +60,8 @@ target_link_libraries(expo-project-2025
 # Add the standard include files to the build
 target_include_directories(expo-project-2025 PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}
+        ${CMAKE_CURRENT_LIST_DIR}/dhcpserver
+        ${CMAKE_CURRENT_LIST_DIR}/dnsserver
 )
 
 # Add any user requested libraries
@@ -61,7 +69,7 @@ target_link_libraries(expo-project-2025
         hardware_dma
         hardware_pio
         pico_cyw43_arch_lwip_threadsafe_background
+        pico_float
         )
 
 pico_add_extra_outputs(expo-project-2025)
-

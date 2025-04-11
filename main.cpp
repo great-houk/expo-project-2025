@@ -604,7 +604,7 @@ void init(char* pixel_buf, int* ind) {
 	*ind = 0;
 }
 
-EVENTS control_handler(EVENTS* key_events) {
+void control_handler(EVENTS* key_events) {
 	char buffer[CONTROLLER_MESSAGE_LENGTH + 1];	 // +1 for null
 
 	for (int i = 0; i < CONTROLLER_MESSAGE_LENGTH; ++i) {
@@ -672,8 +672,8 @@ void update(char* pixel_buf, int* ind, struct AppContext* app) {
 	static int game_over_timer = 0;
 	static bool game_over = false;
 
-	EVENTS events;
-	EVENTS event = control_handler(&events);
+	struct EVENTS events;
+	control_handler(&events);
 	handle_events(&events);
 
 	// Check if game is over
@@ -724,10 +724,6 @@ void update(char* pixel_buf, int* ind, struct AppContext* app) {
 		// Don't update game state while in game over screen
 		return;
 	}
-
-	struct EVENTS events;
-	EVENTS my_events = control_handler(&events);
-	handle_events(&my_events);
 
 	// Update player position
 	player.x += player.velocity_x;
